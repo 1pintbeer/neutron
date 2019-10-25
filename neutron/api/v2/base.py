@@ -22,6 +22,7 @@ from neutron_lib.callbacks import events
 from neutron_lib.callbacks import registry
 from neutron_lib.db import api as db_api
 from neutron_lib import exceptions
+from pycadf import attachment
 from oslo_log import log as logging
 from oslo_policy import policy as oslo_policy
 from oslo_utils import excutils
@@ -134,6 +135,24 @@ class Controller(object):
         for action in [self.CREATE, self.UPDATE, self.DELETE]:
             self._plugin_handlers[action] = '%s%s_%s' % (action, parent_part,
                                                          self._resource)
+
+    def _audit_notify_rpc(self, request, notifier_method, notifier_payload):
+        # keystonemiddleware.audit middleware stores notification event by
+        # 'cadf_event' key in request.environ (see
+        # https://github.com/openstack/keystonemiddleware/blob/master/keystonemiddleware/audit/__init__.py#L123)
+
+        if 'cadf_event' in request.environ:
+            event = request.environ['cadf_event']
+            event.add_attachment(attachment.Attachment(
+                typeURI=request.path_url,
+                content={
+                    'method': notifier_method,
+                    'payload': notifier_payload
+                },
+                name="payload"
+            ))
+
+        self._notifier.info(request.context, notifier_method, notifier_payload)
 
     def _get_primary_key(self, default_primary_key='id'):
         for key, value in self._attr_info.items():
@@ -432,7 +451,7 @@ class Controller(object):
                 # it is then deleted
 
     def create(self, request, body=None, **kwargs):
-        self._notifier.info(request.context,
+        self._audit_notify_rpc(request,
                             self._resource + '.create.start',
                             body)
         return self._create(request, body, **kwargs)
@@ -501,7 +520,7 @@ class Controller(object):
                 resource_registry.set_resources_dirty(request.context)
 
             notifier_method = self._resource + '.create.end'
-            self._notifier.info(request.context,
+            self._audit_notify_rpc(request,
                                 notifier_method,
                                 create_result)
             registry.publish(self._resource, events.BEFORE_RESPONSE, self,
@@ -563,7 +582,7 @@ class Controller(object):
         if request.body:
             msg = _('Request body is not supported in DELETE.')
             raise webob.exc.HTTPBadRequest(msg)
-        self._notifier.info(request.context,
+        self._audit_notify_rpc(request,
                             self._resource + '.delete.start',
                             {self._resource + '_id': id})
         return self._delete(request, id, **kwargs)
@@ -620,7 +639,7 @@ class Controller(object):
             msg = _("Invalid format: %s") % request.body
             raise exceptions.BadRequest(resource='body', msg=msg)
         payload['id'] = id
-        self._notifier.info(request.context,
+        self._audit_notify_rpc(request,
                             self._resource + '.update.start',
                             payload)
         return self._update(request, id, body, **kwargs)
@@ -688,7 +707,7 @@ class Controller(object):
 
         result = {self._resource: self._view(request.context, obj)}
         notifier_method = self._resource + '.update.end'
-        self._notifier.info(request.context, notifier_method, result)
+        self._audit_notify_rpc(request, notifier_method, result)
         registry.publish(self._resource, events.BEFORE_RESPONSE, self,
                          payload=events.APIEventPayload(
                              request.context, notifier_method, action,
